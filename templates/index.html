@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Saham IDX App</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    body { background: #f8fafc; }
+    .footer { text-align:center; color:#888; margin-top:40px; font-size:0.95em; }
+    .card { box-shadow:0 2px 8px rgba(0,0,0,0.04);}
+    .btn-download { margin-right: 10px;}
+  </style>
+</head>
+<body class="p-4">
+  <div class="container">
+    <h1 class="mb-4 text-primary">Saham IDX App</h1>
+
+    <div class="card p-4 mb-4">
+      <form method="POST" class="row g-3 mb-2" action="/">
+        <div class="col-md-5">
+          <input type="text" name="ticker" class="form-control" placeholder="Kode saham (misal: BBCA)" required>
+        </div>
+        <div class="col-md-3">
+          <select name="period" class="form-select">
+            <option value="5m">5 Menit</option>
+            <option value="60m">1 Jam</option>
+            <option value="5d">5 Hari</option>
+            <option value="1mo">1 Bulan</option>
+            <option value="1y">1 Tahun</option>
+            <option value="3y">3 Tahun</option>
+            <option value="5y">5 Tahun</option>
+          </select>
+        </div>
+        <div class="col-md-2 d-grid">
+          <button type="submit" class="btn btn-primary">Cari</button>
+        </div>
+        <div class="col-md-2 d-grid">
+          <button type="reset" class="btn btn-secondary">Reset</button>
+        </div>
+      </form>
+      {% if error_message %}
+        <div class="alert alert-danger mb-0">{{ error_message }}</div>
+      {% endif %}
+    </div>
+
+    {% if stock_data %}
+      <!-- Ringkasan Data Saham -->
+      <div class="row mb-3">
+        <div class="col-md-12">
+          <div class="card p-3">
+            <h5 class="mb-3 text-secondary">Ringkasan Data Terakhir</h5>
+            {% set last = stock_data[-1] %}
+            <div class="row text-center">
+              <div class="col"><b>Tanggal</b><br>{{ last['Date'] }}</div>
+              <div class="col"><b>Open</b><br>{{ last['Open'] }}</div>
+              <div class="col"><b>High</b><br>{{ last['High'] }}</div>
+              <div class="col"><b>Low</b><br>{{ last['Low'] }}</div>
+              <div class="col"><b>Close</b><br>{{ last['Close'] }}</div>
+              <div class="col"><b>Volume</b><br>{{ "{:,}".format(last['Volume']) }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Tombol Download -->
+      <div class="mb-2">
+        <a href="/download" class="btn btn-success btn-download">Download CSV</a>
+        <button class="btn btn-outline-info" id="download-chart">Download Chart</button>
+      </div>
+      <!-- Chart -->
+      <div class="card p-3">
+        <div id="chart" style="height:700px;"></div>
+      </div>
+      <script>
+        const s = JSON.parse('{{ stock_data | tojson | safe }}');
+        if(s.length > 0 && s[0].Date && s[0].Open !== undefined) {
+          const dates = s.map(d=>d['Date']),
+                open = s.map(d=>d['Open']),
+                high = s.map(d=>d['High']),
+                low  = s.map(d=>d['Low']),
+                close= s.map(d=>d['Close']),
+                vol  = s.map(d=>d['Volume']);
+
+          // Warna volume bar mengikuti candle
+          const volColors = close.map((c,i) => c >= open[i] ? 'rgba(0,200,0,0.5)' : 'rgba(200,0,0,0.5)');
+
+          // MA
+          const ma5 = close.map((v,i,a)=> i<4?null:a.slice(i-4,i+1).reduce((x,y)=>x+y,0)/5);
+          const ma20 = close.map((v,i,a)=> i<19?null:a.slice(i-19,i+1).reduce((x,y)=>x+y,0)/20);
+          const ma50 = close.map((v,i,a)=> i<49?null:a.slice(i-49,i+1).reduce((x,y)=>x+y,0)/50);
+
+          // Bollinger Band (20, 2)
+          const bb20 = close.map((v,i,a)=>{
+            if(i<19) return {upper:null,lower:null,mid:null};
+            const slice = a.slice(i-19,i+1);
+            const mean = slice.reduce((x,y)=>x+y,0)/20;
+            const std = Math.sqrt(slice.reduce((x,y)=>x+Math.pow(y-mean,2),0)/20);
+            return {
+              upper: mean + 2*std,
+              lower: mean - 2*std,
+              mid: mean
+            };
+          });
+          const bbUpper = bb20.map(b=>b.upper);
+          const bbLower = bb20.map(b=>b.lower);
+
+          // RSI (14)
+          function calcRSI(closes, period=14) {
+            let rsi = [];
+            for(let i=0;i<closes.length;i++) {
+              if(i<period) { rsi.push(null); continue; }
+              let gains=0,losses=0;
+              for(let j=i-period+1;j<=i;j++) {
+                let diff = closes[j]-closes[j-1];
+                if(diff>0) gains+=diff;
+                else losses-=diff;
+              }
+              let rs = gains/(losses||1);
+              rsi.push(100-(100/(1+rs)));
+            }
+            return rsi;
+          }
+          const rsi = calcRSI(close,14);
+
+          // MACD (12,26,9)
+          function ema(arr, period) {
+            let k = 2/(period+1), emaArr = [];
+            arr.forEach((v,i) => {
+              if(i===0) emaArr.push(v);
+              else emaArr.push(v*k + emaArr[i-1]*(1-k));
+            });
+            return emaArr;
+          }
+          const ema12 = ema(close,12);
+          const ema26 = ema(close,26);
+          const macdLine = ema12.map((v,i) => v-ema26[i]);
+          const signalLine = ema(macdLine,9);
+          const macdHist = macdLine.map((v,i) => v-signalLine[i]);
+
+          // MFI (14)
+          function calcMFI(high, low, close, vol, period=14) {
+            let mfi = [];
+            for(let i=0;i<close.length;i++) {
+              if(i<period) { mfi.push(null); continue; }
+              let posMF=0, negMF=0;
+              for(let j=i-period+1;j<=i;j++) {
+                let tp = (high[j]+low[j]+close[j])/3;
+                let prevTp = (high[j-1]+low[j-1]+close[j-1])/3;
+                let mf = tp*vol[j];
+                if(tp>prevTp) posMF+=mf;
+                else if(tp<prevTp) negMF+=mf;
+              }
+              let mr = posMF/(negMF||1);
+              mfi.push(100-(100/(1+mr)));
+            }
+            return mfi;
+          }
+          const mfi = calcMFI(high,low,close,vol,14);
+
+          const traces=[
+            {x:dates,open,high,low,close,type:'candlestick',name:'OHLC',increasing:{line:{color:'green'}},decreasing:{line:{color:'red'}},xaxis:'x',yaxis:'y'},
+            {x:dates,y:vol,type:'bar',name:'Volume',yaxis:'y2',marker:{color:volColors}},
+            {x:dates,y:ma5,type:'scatter',mode:'lines',name:'MA5',line:{color:'blue'},yaxis:'y'},
+            {x:dates,y:ma20,type:'scatter',mode:'lines',name:'MA20',line:{color:'purple'},yaxis:'y'},
+            {x:dates,y:ma50,type:'scatter',mode:'lines',name:'MA50',line:{color:'green'},yaxis:'y'},
+            {x:dates,y:bbUpper,type:'scatter',mode:'lines',name:'BB Upper',line:{color:'orange',dash:'dot'},yaxis:'y'},
+            {x:dates,y:bbLower,type:'scatter',mode:'lines',name:'BB Lower',line:{color:'orange',dash:'dot'},yaxis:'y'},
+            {x:dates,y:macdLine,type:'scatter',mode:'lines',name:'MACD',line:{color:'black'},yaxis:'y3'},
+            {x:dates,y:signalLine,type:'scatter',mode:'lines',name:'Signal',line:{color:'orange'},yaxis:'y3'},
+            {x:dates,y:macdHist,type:'bar',name:'MACD Hist',yaxis:'y3',marker:{color:macdHist.map(v=>v>=0?'rgba(0,200,0,0.5)':'rgba(200,0,0,0.5)')}},
+            {x:dates,y:rsi,type:'scatter',mode:'lines',name:'RSI',line:{color:'magenta'},yaxis:'y4'},
+            {x:dates,y:mfi,type:'scatter',mode:'lines',name:'MFI',line:{color:'brown'},yaxis:'y5'}
+          ];
+
+          Plotly.newPlot('chart', traces, {
+            title: 'Grafik Saham',
+            xaxis: {rangeslider: {visible: false}, type: 'category'},
+            yaxis: {domain: [0.5, 1]},
+            yaxis2: {domain: [0.35, 0.48], title: 'Volume'},
+            yaxis3: {domain: [0.25, 0.34], title: 'MACD'},
+            yaxis4: {domain: [0.13, 0.23], title: 'RSI', range: [0,100]},
+            yaxis5: {domain: [0, 0.12], title: 'MFI', range: [0,100]},
+            height: 900,
+            legend: {orientation: 'h'}
+          });
+
+          // Download chart as PNG
+          document.getElementById('download-chart').onclick = function() {
+            Plotly.downloadImage('chart', {format:'png', filename:'chart_saham'});
+          };
+        } else {
+          document.getElementById('chart').innerHTML = "Data tidak valid atau kosong";
+        }
+      </script>
+    {% endif %}
+
+    <!-- Screening Saham Otomatis 
+    <div class="card p-4 mb-4">
+      <form method="POST" action="/screening" class="row g-3">
+        <div class="col-md-6">
+          <input type="text" name="tickers" class="form-control" placeholder="Kode saham, pisahkan koma (misal: BBCA, BBRI, TLKM)" required>
+        </div>
+        <div class="col-md-3">
+          <select name="period" class="form-select">
+            <option value="1mo">1 Bulan</option>
+            <option value="3mo">3 Bulan</option>
+            <option value="6mo">6 Bulan</option>
+            <option value="1y">1 Tahun</option>
+          </select>
+        </div>
+        <div class="col-md-3 d-grid">
+          <button type="submit" class="btn btn-warning">Screening Saham</button>
+        </div>
+      </form>
+      {% if screening_result %}
+        <div class="alert alert-info mt-3">
+          <b>Hasil Screening:</b>
+          <ul>
+            {% for s in screening_result %}
+              <li>
+                {{ s }}
+                <button class="btn btn-outline-primary btn-sm ms-2" onclick="addToWatchlist('{{ s.split(' ')[0] }}')">Tambah ke Watchlist</button>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+    </div>
+    -->
+    <!-- Watchlist 
+    <div class="card p-3 mb-3">
+      <h6>Watchlist Anda:</h6>
+      <ul id="watchlist"></ul>
+    </div>
+    <script>
+    function addToWatchlist(ticker) {
+      let wl = JSON.parse(localStorage.getItem('watchlist')||'[]');
+      if(!wl.includes(ticker)) wl.push(ticker);
+      localStorage.setItem('watchlist', JSON.stringify(wl));
+      showWatchlist();
+      alert('Ditambahkan ke watchlist!');
+    }
+    function showWatchlist() {
+      let wl = JSON.parse(localStorage.getItem('watchlist')||'[]');
+      document.getElementById('watchlist').innerHTML = wl.length ? wl.map(t=>`<li>${t}</li>`).join('') : '<li><i>Belum ada</i></li>';
+    }
+    window.onload = showWatchlist;
+    </script>-->
+
+    <div class="footer">
+      &copy; {{ 2025 }} Saham IDX App &middot; Powered by Flask, yFinance, Plotly, Bootstrap
+    </div>
+  </div>
+</body>
+</html>
+
